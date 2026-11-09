@@ -10,6 +10,13 @@ small rectangle with your folders. Tap a folder and a second rectangle
 slides up with the files inside as icons. Tap a file to open it, or
 long-press / drag it out to send it into WhatsApp.
 
+It keeps my school, university, and office documents in one place,
+private and local on my phone, and reachable in one tap from the
+bubble: School (Class X and Class XII certificates), University
+(transcripts Sem 1–8, degree, CMM, PCC, Transfer Certificate), and
+office documents. Nothing leaves the device unless I share a file
+myself.
+
 ## What it is
 
 - **Native Android, Kotlin + Jetpack Compose.** Package
