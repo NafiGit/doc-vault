@@ -26,7 +26,7 @@ myself.
   file (`files/vault.json`). No account, no cloud, no server, no
   analytics. Nothing is uploaded anywhere.
 - **Seeded structure, no real documents.** The first run creates the
-  School / University folders above, with placeholder entries naming
+  School / University / Office folders above, with placeholder entries naming
   the kind of document that belongs there (e.g. "Class X Certificate.pdf").
   Tapping a placeholder prompts you to import the real file. **No real
   certificate, transcript, ticket, key or personal file is in this repo.**
