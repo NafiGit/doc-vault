@@ -57,6 +57,12 @@ object SeedData {
         placeholder(pcc, "Medium of Instruction Certificate.pdf", 0)
         placeholder(tc, "Transfer Certificate.pdf", 0)
 
+        val office = folder("Office", null, 2)
+        placeholder(office, "Offer Letter.pdf", 0)
+        placeholder(office, "Payslip.pdf", 1)
+        placeholder(office, "Experience Letter.pdf", 2)
+        placeholder(office, "ID Card.pdf", 3)
+
         return VaultState(folders = folders, files = files, seeded = true)
     }
 }
