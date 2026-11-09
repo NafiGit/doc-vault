@@ -1,5 +1,10 @@
 # Doc Vault — personal documents as a floating bubble
 
+## Website
+
+Pitch site: https://doc-vault-pizlco6xp-nafigits-projects.vercel.app
+(source in this repo under `docs/pitch-site.html`)
+
 A small native Android app for keeping your own documents close at hand,
 DigiLocker-style, but as a **floating widget over other apps** instead of
 another app you have to open, search, and leave.
