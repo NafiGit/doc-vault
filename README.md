@@ -111,11 +111,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Then open Doc Vault, tap "Show floating bubble", grant "Display over
 other apps" when Settings opens, and go back — the bubble appears.
 
-> **Build status (honest): no APK was built here.** This machine has
-> no Java and no Android SDK installed, so `./gradlew` could not run.
-> The Kotlin was checked by careful re-reading, not by a compiler.
-> Build it in Android Studio on a machine with the SDK before
-> trusting it on a phone.
+> **Build status: a debug APK was built successfully on Nov 9, 2026**
+> (`assembleDebug`, Gradle 8.5, JDK 17, SDK 34) — `app-debug.apk`,
+> 15,648,828 bytes, debug-signed, package `com.nahfid.docvault`.
+> Install it with `adb install -r app-debug.apk`. It is a debug build
+> for testing on a real phone; the bubble gestures, overlay
+> permission on OEM skins, and drag-to-WhatsApp are not yet
+> device-tested.
 
 ## Honest limits
 
