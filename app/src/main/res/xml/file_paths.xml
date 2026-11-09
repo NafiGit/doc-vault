@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths. Only the app-private vault dir is ever shared. -->
+<paths>
+    <files-path name="vault" path="vault/" />
+</paths>
