@@ -10,11 +10,6 @@ small rectangle with your folders. Tap a folder and a second rectangle
 slides up with the files inside as icons. Tap a file to open it, or
 long-press / drag it out to send it into WhatsApp.
 
-Built for one person (Nahfid) to carry university + school documents:
-School (Class X, Class XII) and University (Transcripts Sem 1–8, Degree,
-CMM, PCC, Transfer Certificate). Folders can be rearranged, renamed,
-added and deleted, and files can be moved between folders.
-
 ## What it is
 
 - **Native Android, Kotlin + Jetpack Compose.** Package
