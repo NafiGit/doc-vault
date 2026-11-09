@@ -62,8 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.awaitFirstDown
-import androidx.compose.ui.input.pointer.awaitPointerEventScope
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
@@ -183,7 +182,9 @@ fun BubbleButton(onTap: () -> Unit, onDrag: (dx: Float, dy: Float) -> Unit) {
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull() ?: break
-                            if (change.changedToUpOrCanceled()) break
+                            // Finger lifted: changedToUpOrCanceled() does not
+                            // exist in Compose 1.6, so check it directly.
+                            if (change.previousPressed && !change.pressed) break
                             val delta = change.position - change.previousPosition
                             val step = abs(delta.x) + abs(delta.y)
                             if (!dragging && moved + step > 8f) dragging = true
