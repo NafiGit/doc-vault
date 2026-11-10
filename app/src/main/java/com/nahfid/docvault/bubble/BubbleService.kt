@@ -61,6 +61,11 @@ class BubbleService : Service() {
     private lateinit var lifecycleOwner: OverlayLifecycleOwner
     private lateinit var viewModel: VaultViewModel
 
+    // Bubble position before the panel opened, so collapse can put
+    // the bubble back where it was.
+    private var collapsedX = 0
+    private var collapsedY = 0
+
     override fun onCreate() {
         super.onCreate()
         val repository = (application as DocVaultApp).repository
@@ -121,6 +126,23 @@ class BubbleService : Service() {
         } else {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        }
+        // The panel is 320dp wide but the bubble sits near the right
+        // edge (x = width - 200px), so without this the expanded panel
+        // would hang mostly off the right of the screen. Keep the whole
+        // panel on screen when it opens, and put the bubble back where
+        // it was when it closes.
+        val metrics = resources.displayMetrics
+        val panelWidthPx = (320 * metrics.density).toInt()
+        val panelHeightPx = (420 * metrics.density).toInt()
+        if (value) {
+            collapsedX = params.x
+            collapsedY = params.y
+            params.x = params.x.coerceIn(0, metrics.widthPixels - panelWidthPx)
+            params.y = params.y.coerceIn(0, metrics.heightPixels - panelHeightPx)
+        } else {
+            params.x = collapsedX
+            params.y = collapsedY
         }
         runCatching { windowManager.updateViewLayout(composeView, params) }
     }
