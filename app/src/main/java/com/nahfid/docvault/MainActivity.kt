@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,17 +33,25 @@ import androidx.core.content.ContextCompat
 import com.nahfid.docvault.bubble.BubbleService
 import com.nahfid.docvault.bubble.FilesPanel
 import com.nahfid.docvault.bubble.VaultPanel
+import com.nahfid.docvault.data.OnboardingPrefs
 import com.nahfid.docvault.data.VaultFolder
 import com.nahfid.docvault.share.ShareHelper
 import com.nahfid.docvault.ui.DocVaultTheme
+import com.nahfid.docvault.ui.OnboardingScreen
 import com.nahfid.docvault.ui.VaultViewModel
 
 /**
  * The app's own screen. It does three jobs:
- * 1. Permission gate: "Draw over other apps" must be granted in
- *    Settings before the bubble can appear; the button below opens
- *    that exact Settings page. On Android 13+ the notification
- *    permission is also requested (the bubble is a foreground service).
+ * 1. First-run onboarding: on the first launch, before anything
+ *    else, the user is told which permissions Doc Vault needs and
+ *    why, and grants them — "Display over other apps" (the bubble
+ *    cannot appear without it) and notifications on Android 13+
+ *    (the bubble's foreground-service notification). The main
+ *    screen only appears once both are granted. Completion is
+ *    remembered in SharedPreferences, so it never shows again, and
+ *    users who already granted both permissions skip it entirely.
+ *    No storage permission is asked for: importing uses the system
+ *    file picker (Storage Access Framework).
  * 2. Bubble switch: start / hide the floating bubble.
  * 3. Full vault: the same folders + files panels as the bubble,
  *    full-screen, for organising without the overlay. Importing a
@@ -57,17 +66,38 @@ import com.nahfid.docvault.ui.VaultViewModel
 class MainActivity : ComponentActivity() {
 
     private lateinit var viewModel: VaultViewModel
+    private lateinit var onboardingPrefs: OnboardingPrefs
     private var pendingImportFolderId: String? = null
     private var pendingPlaceholderName: String? = null
 
+    // Onboarding state. The statuses live here (not in the
+    // composable) so they can be refreshed from onResume, when the
+    // user comes back from Settings.
+    private var showOnboarding by mutableStateOf(false)
+    private var overlayGranted by mutableStateOf(false)
+    private var notificationsGranted by mutableStateOf(true)
+    private var notificationAsked = false
+    private var overlayRequestedFromMain = false
+
     private val overlayPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (Settings.canDrawOverlays(this)) startBubble() else
+            refreshPermissionStates()
+            if (Settings.canDrawOverlays(this)) {
+                if (overlayRequestedFromMain) {
+                    overlayRequestedFromMain = false
+                    startBubble()
+                }
+            } else if (overlayRequestedFromMain) {
+                overlayRequestedFromMain = false
                 Toast.makeText(this, "Overlay permission is needed for the bubble.", Toast.LENGTH_LONG).show()
+            }
         }
 
     private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* optional */ }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            notificationAsked = true
+            refreshPermissionStates()
+        }
 
     private val pickDocumentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -84,60 +114,34 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel = VaultViewModel((application as DocVaultApp).repository)
+        onboardingPrefs = OnboardingPrefs(this)
         pendingImportFolderId = intent.getStringExtra(EXTRA_IMPORT_FOLDER)
         pendingPlaceholderName = intent.getStringExtra(EXTRA_PLACEHOLDER_NAME)
+        refreshPermissionStates()
+        // First run, or an upgrade where a required permission is
+        // still missing: show onboarding. Users who already granted
+        // both go straight to the main screen.
+        showOnboarding = !onboardingPrefs.isDone() && !(overlayGranted && notificationsGranted)
 
         setContent {
             DocVaultTheme {
-                var parentId by remember { mutableStateOf<String?>(null) }
-                var openFolder by remember { mutableStateOf<VaultFolder?>(null) }
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(16.dp)
-                ) {
-                    Text("Doc Vault", style = androidx.compose.material3.MaterialTheme.typography.headlineMedium)
-                    Text("Your documents, on this device only. No account, no cloud.")
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = { ensureOverlayPermissionAndStart() },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Show floating bubble") }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = { stopService(BubbleService.stopIntent(this@MainActivity)) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Hide bubble") }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    VaultPanel(
-                        viewModel = viewModel,
-                        parentId = parentId,
-                        onNavigateInto = { parentId = it },
-                        onNavigateBack = { parentId = null },
-                        onOpenFolder = { openFolder = it },
-                        onClose = { openFolder = null }
+                if (showOnboarding) {
+                    OnboardingScreen(
+                        overlayGranted = overlayGranted,
+                        notificationsGranted = notificationsGranted,
+                        notificationsApplicable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                        notificationsDenied = notificationAsked && !notificationsGranted,
+                        onRequestOverlay = {
+                            overlayPermissionLauncher.launch(
+                                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                            )
+                        },
+                        onRequestNotifications = { requestNotifications() },
+                        onOpenAppSettings = { openAppSettings() },
+                        onFinish = { finishOnboarding() }
                     )
-                    openFolder?.let { folder ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        FilesPanel(
-                            viewModel = viewModel,
-                            folder = folder,
-                            onCloseFiles = { openFolder = null },
-                            onImportRequest = { folderId, placeholder ->
-                                requestImport(folderId, placeholder)
-                            },
-                            onOpenFile = { entry ->
-                                val file = viewModel.storedFile(entry) ?: return@FilesPanel
-                                ShareHelper.openFile(this@MainActivity, entry, file)
-                            },
-                            onShareFile = { entry ->
-                                val file = viewModel.storedFile(entry) ?: return@FilesPanel
-                                ShareHelper.shareFile(this@MainActivity, entry, file)
-                            },
-                            onDragOut = { entry, view ->
-                                val file = viewModel.storedFile(entry) ?: return@FilesPanel
-                                ShareHelper.startDragOut(view, this@MainActivity, entry, file)
-                            }
-                        )
-                    }
+                } else {
+                    MainVaultScreen()
                 }
             }
         }
@@ -145,11 +149,104 @@ class MainActivity : ComponentActivity() {
         if (pendingImportFolderId != null) {
             requestImport(pendingImportFolderId!!, pendingPlaceholderName)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
+        if (!showOnboarding &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationsGranted
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The user may have just come back from Settings: re-check
+        // so the onboarding steps show their current status.
+        refreshPermissionStates()
+    }
+
+    /** Re-reads both required permissions into the onboarding state. */
+    private fun refreshPermissionStates() {
+        overlayGranted = Settings.canDrawOverlays(this)
+        notificationsGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun finishOnboarding() {
+        onboardingPrefs.setDone()
+        showOnboarding = false
+    }
+
+    private fun requestNotifications() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (notificationAsked &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            // Denied permanently: the system prompt will not show
+            // again, so the only route left is app settings.
+            openAppSettings()
+        } else {
+            notificationAsked = true
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        )
+    }
+
+    @Composable
+    private fun MainVaultScreen() {
+        var parentId by remember { mutableStateOf<String?>(null) }
+        var openFolder by remember { mutableStateOf<VaultFolder?>(null) }
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp)
+        ) {
+            Text("Doc Vault", style = androidx.compose.material3.MaterialTheme.typography.headlineMedium)
+            Text("Your documents, on this device only. No account, no cloud.")
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = { ensureOverlayPermissionAndStart() },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Show floating bubble") }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = { stopService(BubbleService.stopIntent(this@MainActivity)) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Hide bubble") }
+            Spacer(modifier = Modifier.height(16.dp))
+            VaultPanel(
+                viewModel = viewModel,
+                parentId = parentId,
+                onNavigateInto = { parentId = it },
+                onNavigateBack = { parentId = null },
+                onOpenFolder = { openFolder = it },
+                onClose = { openFolder = null }
+            )
+            openFolder?.let { folder ->
+                Spacer(modifier = Modifier.height(8.dp))
+                FilesPanel(
+                    viewModel = viewModel,
+                    folder = folder,
+                    onCloseFiles = { openFolder = null },
+                    onImportRequest = { folderId, placeholder ->
+                        requestImport(folderId, placeholder)
+                    },
+                    onOpenFile = { entry ->
+                        val file = viewModel.storedFile(entry) ?: return@FilesPanel
+                        ShareHelper.openFile(this@MainActivity, entry, file)
+                    },
+                    onShareFile = { entry ->
+                        val file = viewModel.storedFile(entry) ?: return@FilesPanel
+                        ShareHelper.shareFile(this@MainActivity, entry, file)
+                    },
+                    onDragOut = { entry, view ->
+                        val file = viewModel.storedFile(entry) ?: return@FilesPanel
+                        ShareHelper.startDragOut(view, this@MainActivity, entry, file)
+                    }
+                )
+            }
         }
     }
 
@@ -163,6 +260,7 @@ class MainActivity : ComponentActivity() {
         if (Settings.canDrawOverlays(this)) {
             startBubble()
         } else {
+            overlayRequestedFromMain = true
             overlayPermissionLauncher.launch(
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
