@@ -2,7 +2,12 @@ package com.nahfid.docvault.data
 
 import android.content.Context
 import android.net.Uri
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -32,6 +37,17 @@ class VaultRepository(context: Context) {
 
     private var state: VaultState = loadFromDisk()
 
+    // Disk writes never run on the calling thread: every mutation
+    // above (add, rename, move during a drag) is called from the
+    // main thread, and even a tiny JSON write is disk I/O. The
+    // in-memory state is the new one immediately, so the UI never
+    // waits on the write. Writes are serialised through one mutex
+    // and always persist the *current* state, so a burst of saves
+    // (e.g. one per row crossed while reordering) can never leave
+    // an older snapshot on disk.
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val saveMutex = Mutex()
+
     private fun loadFromDisk(): VaultState {
         if (!storeFile.exists()) return SeedData.build().also { saveToDisk(it) }
         return try {
@@ -45,7 +61,11 @@ class VaultRepository(context: Context) {
 
     private fun saveToDisk(next: VaultState) {
         state = next
-        storeFile.writeText(json.encodeToString(next))
+        ioScope.launch {
+            saveMutex.withLock {
+                runCatching { storeFile.writeText(json.encodeToString(state)) }
+            }
+        }
     }
 
     fun current(): VaultState = state
@@ -91,7 +111,9 @@ class VaultRepository(context: Context) {
     fun deleteFolder(id: String) {
         // Delete the folder, its children, their files on disk, and index rows.
         val doomed = state.folders.filter { it.id == id || it.parentId == id }.map { it.id }
-        doomed.forEach { File(vaultDir, it).deleteRecursively() }
+        ioScope.launch {
+            doomed.forEach { File(vaultDir, it).deleteRecursively() }
+        }
         saveToDisk(state.copy(
             folders = state.folders.filterNot { it.id in doomed },
             files = state.files.filterNot { it.folderId in doomed }
