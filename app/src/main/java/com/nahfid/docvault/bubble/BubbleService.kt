@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
@@ -46,9 +47,13 @@ import com.nahfid.docvault.ui.VaultViewModel
  * - Collapsed: a 56dp bubble, FLAG_NOT_FOCUSABLE so touches pass
  *   through everywhere except the bubble itself. Dragging the bubble
  *   moves the window by updating the LayoutParams x/y.
- * - Expanded: the panel needs text input (new folder name) and
- *   scrolling, so FLAG_NOT_FOCUSABLE is cleared and the window
- *   grows to wrap the panel. Tapping Close shrinks it back.
+ * - Expanded: the strip UI. The window stays FLAG_NOT_FOCUSABLE —
+ *   the strips have no text input, so the app underneath keeps
+ *   receiving touches everywhere the strips are not. The strip grows
+ *   away from whichever edge the bubble is on, and the window is
+ *   repositioned from the content's measured size so the collapse
+ *   slot sits exactly where the bubble was and the detail strip
+ *   never runs off-screen. Tapping collapse shrinks it back.
  *
  * The service is started from MainActivity after the user grants
  * "Draw over other apps". Stopping it removes the bubble.
@@ -65,6 +70,14 @@ class BubbleService : Service() {
     // the bubble back where it was.
     private var collapsedX = 0
     private var collapsedY = 0
+
+    // Geometry the strip UI reads: which way it opens, and where the
+    // bubble was, so it can decide whether the detail strip fits above.
+    private val openLeftState = mutableStateOf(false)
+    private val anchorYState = mutableStateOf(0)
+    private var expanded = false
+    private var lastPlacedX = Int.MIN_VALUE
+    private var lastPlacedY = Int.MIN_VALUE
 
     override fun onCreate() {
         super.onCreate()
@@ -110,7 +123,10 @@ class BubbleService : Service() {
                         },
                         onOpenFile = { entry -> openFile(entry) },
                         onShareFile = { entry -> shareFile(entry) },
-                        onDragOut = { entry, view -> dragOut(entry, view) }
+                        onDragOut = { entry, view -> dragOut(entry, view) },
+                        openLeft = openLeftState.value,
+                        anchorYPx = anchorYState.value,
+                        onContentSize = { w, h, detailAbove -> reposition(w, h, detailAbove) }
                     )
                 }
             }
@@ -119,31 +135,78 @@ class BubbleService : Service() {
         lifecycleOwner.handleResume()
     }
 
-    /** Called when the panel opens or closes; resizes the window. */
+    /** Called when the strip opens or closes; anchors the window. */
     fun setExpanded(value: Boolean) {
-        params.flags = if (value) {
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        } else {
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        }
-        // The panel is 320dp wide but the bubble sits near the right
-        // edge (x = width - 200px), so without this the expanded panel
-        // would hang mostly off the right of the screen. Keep the whole
-        // panel on screen when it opens, and put the bubble back where
-        // it was when it closes.
+        expanded = value
         val metrics = resources.displayMetrics
-        val panelWidthPx = (320 * metrics.density).toInt()
-        val panelHeightPx = (420 * metrics.density).toInt()
+        val density = metrics.density
+        // The strips have no text input, so the window never takes
+        // focus: touches outside the bubble and strips keep reaching
+        // the app underneath.
+        params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         if (value) {
             collapsedX = params.x
             collapsedY = params.y
-            params.x = params.x.coerceIn(0, metrics.widthPixels - panelWidthPx)
-            params.y = params.y.coerceIn(0, metrics.heightPixels - panelHeightPx)
+            anchorYState.value = params.y
+            // Bubble on the right half opens leftwards, left half
+            // opens rightwards.
+            val bubbleCenterX = params.x + (BUBBLE_SIZE_DP * density).toInt() / 2
+            openLeftState.value = bubbleCenterX > metrics.widthPixels / 2
+            // First frame from the predicted strip width; the first
+            // content-size report corrects it exactly.
+            val folders = viewModel.topLevelFolders().size
+            val screenWidthDp = (metrics.widthPixels / density).toInt()
+            val predictedW = (minOf(stripWidthDp(folders), screenWidthDp - 16) * density).toInt()
+            val hamburgerLeftPx = if (openLeftState.value) {
+                predictedW - (STRIP_PADDING_DP * density).toInt() -
+                    (STRIP_HAMBURGER_WIDTH_DP * density).toInt()
+            } else {
+                (STRIP_PADDING_DP * density).toInt()
+            }
+            params.x = collapsedX - hamburgerLeftPx
+            params.y = collapsedY - (STRIP_PADDING_DP * density).toInt()
+            lastPlacedX = Int.MIN_VALUE
+            lastPlacedY = Int.MIN_VALUE
         } else {
             params.x = collapsedX
             params.y = collapsedY
         }
+        runCatching { windowManager.updateViewLayout(composeView, params) }
+    }
+
+    /**
+     * Repositions the window from the content's measured size, so the
+     * collapse slot sits exactly where the bubble was and the whole
+     * strip stays on screen. Called on every size change while the
+     * strip is open (detail opening, closing, navigating).
+     */
+    private fun reposition(contentW: Int, contentH: Int, detailAbove: Boolean) {
+        if (!expanded) return
+        val metrics = resources.displayMetrics
+        val density = metrics.density
+        val topPadPx = (STRIP_PADDING_DP * density).toInt()
+        // Left edge of the collapse slot inside the content.
+        val hamburgerLeftPx = if (openLeftState.value) {
+            contentW - topPadPx - (STRIP_HAMBURGER_WIDTH_DP * density).toInt()
+        } else {
+            topPadPx
+        }
+        var x = collapsedX - hamburgerLeftPx
+        // The strip's top edge must sit where the bubble's top was.
+        // When the detail is above the strip, the strip is at the
+        // bottom of the content; otherwise it is at the top.
+        val stripBottomPx =
+            ((STRIP_SLOT_HEIGHT_DP + STRIP_PADDING_DP) * density).toInt()
+        var y = if (detailAbove) collapsedY + stripBottomPx - contentH
+            else collapsedY - topPadPx
+        x = x.coerceIn(0, (metrics.widthPixels - contentW).coerceAtLeast(0))
+        y = y.coerceIn(0, (metrics.heightPixels - contentH).coerceAtLeast(0))
+        if (x == lastPlacedX && y == lastPlacedY) return
+        lastPlacedX = x
+        lastPlacedY = y
+        params.x = x
+        params.y = y
         runCatching { windowManager.updateViewLayout(composeView, params) }
     }
 
