@@ -1,17 +1,22 @@
 package com.nahfid.docvault.bubble
 
 import android.view.View
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandIn
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -37,6 +43,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
@@ -64,6 +71,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,23 +82,47 @@ import com.nahfid.docvault.data.VaultFile
 import com.nahfid.docvault.data.VaultFolder
 import com.nahfid.docvault.ui.VaultViewModel
 import kotlin.math.abs
+import kotlin.math.min
+
+/** Geometry of the strip UI, shared with [BubbleService] so it can anchor the window. */
+const val BUBBLE_SIZE_DP = 56
+const val STRIP_SLOT_WIDTH_DP = 84
+const val STRIP_SLOT_HEIGHT_DP = 64
+const val STRIP_HAMBURGER_WIDTH_DP = 56
+const val STRIP_GAP_DP = 8
+const val STRIP_PADDING_DP = 8
+const val DETAIL_STRIP_WIDTH_DP = 200
+const val DETAIL_ROW_HEIGHT_DP = 52
+
+/** Width of the horizontal strip for [folderCount] top-level folders, in dp. */
+fun stripWidthDp(folderCount: Int): Int =
+    STRIP_PADDING_DP * 2 + STRIP_HAMBURGER_WIDTH_DP +
+        folderCount * (STRIP_SLOT_WIDTH_DP + STRIP_GAP_DP)
 
 /**
  * The floating UI, in three states:
  *
- *  Collapsed  -> a small draggable bubble (WhisperFlow-style).
- *  Folders    -> tap the bubble, it expands into a small rectangle
- *                panel listing folders. Long-press a folder's drag
- *                handle and drag up/down to reorder it.
- *  Files      -> tap a leaf folder and a second rectangle slides up
- *                from the bottom of the panel with the files inside
- *                as icons. Tap a file to open it. Long-press a file
- *                and drag it out of the bubble to drop it on another
- *                app (best-effort); the share button always works
- *                and opens the system share sheet (WhatsApp included).
+ *  Collapsed -> a small draggable bubble (WhisperFlow-style).
+ *  Strip     -> tap the bubble, it opens into a slim horizontal strip:
+ *               a hamburger/X slot plus one small rectangle per
+ *               top-level folder (icon + name). The strip grows away
+ *               from whichever screen edge the bubble is on, so it
+ *               never runs off-screen. Long-press a folder slot and
+ *               drag sideways to reorder it.
+ *  Detail    -> tap a folder and a slim vertical strip opens above it
+ *               (below it when the bubble is near the top of the
+ *               screen), listing that folder's children — the two
+ *               strips form an L. A folder with no children opens
+ *               its files instead. The hamburger slot turns into an
+ *               X; tapping it collapses everything back to the bubble.
  *
  * The same [VaultPanel] content is reused full-screen by MainActivity,
- * so the vault is usable with or without the bubble.
+ * so the vault is usable with or without the bubble. Adding folders
+ * happens there; the strip is for opening things fast.
+ *
+ * The overlay window stays non-focusable in every state: there is no
+ * text input in the strips, so touches outside the bubble and strips
+ * keep reaching the app underneath.
  */
 
 @Composable
@@ -100,11 +134,15 @@ fun BubbleRoot(
     onImportRequest: (folderId: String, placeholderName: String?) -> Unit,
     onOpenFile: (VaultFile) -> Unit,
     onShareFile: (VaultFile) -> Unit,
-    onDragOut: (VaultFile, View) -> Unit
+    onDragOut: (VaultFile, View) -> Unit,
+    openLeft: Boolean,
+    anchorYPx: Int,
+    onContentSize: (widthPx: Int, heightPx: Int, detailAbove: Boolean) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-    var parentId by remember { mutableStateOf<String?>(null) }
-    var openFolder by remember { mutableStateOf<VaultFolder?>(null) }
+    // Path from the tapped top-level folder down to the folder shown
+    // in the detail area. Empty means no detail is open.
+    var detailPath by remember { mutableStateOf<List<String>>(emptyList()) }
 
     // Tell the service to grow the window (and take focus) when the
     // panel opens, and shrink it back when it closes.
@@ -120,36 +158,293 @@ fun BubbleRoot(
         return
     }
 
-    Column(modifier = Modifier.width(320.dp)) {
-        VaultPanel(
-            viewModel = viewModel,
-            parentId = parentId,
-            onNavigateInto = { parentId = it },
-            onNavigateBack = { parentId = null },
-            onOpenFolder = { openFolder = it },
-            onClose = {
+    val state by viewModel.state.collectAsState()
+    val folders = viewModel.topLevelFolders()
+    val density = LocalDensity.current
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val stripWidth = min(stripWidthDp(folders.size), screenWidthDp - 16)
+
+    val detailId = detailPath.lastOrNull()
+    val detailFolder = detailId?.let { id -> state.folders.firstOrNull { it.id == id } }
+    val detailChildren = detailFolder?.let { viewModel.childFolders(it.id) } ?: emptyList()
+    // Height the detail area will need, in dp. Only used to decide
+    // whether it fits above the strip.
+    val detailHeightDp = when {
+        detailFolder == null -> 0
+        detailChildren.isEmpty() -> 340
+        else -> 16 + detailChildren.size * DETAIL_ROW_HEIGHT_DP +
+            if (detailPath.size > 1) DETAIL_ROW_HEIGHT_DP else 0
+    }
+    val anchorYDp = with(density) { anchorYPx.toDp().value }
+    val nearTop = detailFolder != null &&
+        anchorYDp < detailHeightDp + STRIP_SLOT_HEIGHT_DP + 48
+    val detailAbove = detailFolder != null && !nearTop
+
+    // X offset of the vertical strip, lined up under the tapped
+    // top-level slot and clamped so it never leaves the window.
+    val topIndex = detailPath.firstOrNull()
+        ?.let { id -> folders.indexOfFirst { it.id == id } } ?: -1
+    val innerWidth = stripWidth - STRIP_PADDING_DP * 2
+    val slotPos = if (topIndex < 0) 0 else topIndex + if (openLeft) 0 else 1
+    val detailOffsetXDp = (slotPos * (STRIP_SLOT_WIDTH_DP + STRIP_GAP_DP))
+        .coerceIn(0, (innerWidth - DETAIL_STRIP_WIDTH_DP).coerceAtLeast(0))
+
+    val closeDetail = { detailPath = emptyList() }
+    val goBack = { detailPath = detailPath.dropLast(1) }
+
+    Column(
+        modifier = Modifier
+            .width(stripWidth.dp)
+            .onGloballyPositioned { coords ->
+                onContentSize(coords.size.width, coords.size.height, detailAbove)
+            }
+            .padding(STRIP_PADDING_DP.dp)
+    ) {
+        if (detailFolder != null && detailAbove) {
+            DetailArea(
+                viewModel = viewModel,
+                folder = detailFolder,
+                offsetXDp = detailOffsetXDp,
+                hasParent = detailPath.size > 1,
+                onNavigateInto = { detailPath = detailPath + it },
+                onNavigateBack = goBack,
+                onImportRequest = onImportRequest,
+                onOpenFile = onOpenFile,
+                onShareFile = onShareFile,
+                onDragOut = onDragOut
+            )
+            Spacer(modifier = Modifier.height(STRIP_GAP_DP.dp))
+        }
+        FolderStrip(
+            folders = folders,
+            openLeft = openLeft,
+            detailTopId = detailPath.firstOrNull(),
+            detailOpen = detailFolder != null,
+            onToggleFolder = { folder ->
+                detailPath =
+                    if (detailPath.firstOrNull() == folder.id) emptyList()
+                    else listOf(folder.id)
+            },
+            onMoveFolder = { folder, index, delta ->
+                viewModel.moveFolder(folder.id, index + delta)
+            },
+            onCollapse = {
                 expanded = false
-                openFolder = null
-                parentId = null
+                detailPath = emptyList()
                 onCollapse()
             }
         )
-        // Second rectangle: slides up when a folder is open.
-        AnimatedVisibility(
-            visible = openFolder != null,
-            enter = slideInVertically(initialOffsetY = { it }) + expandIn() + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + shrinkOut() + fadeOut()
-        ) {
-            openFolder?.let { folder ->
-                FilesPanel(
-                    viewModel = viewModel,
-                    folder = folder,
-                    onCloseFiles = { openFolder = null },
-                    onImportRequest = onImportRequest,
-                    onOpenFile = onOpenFile,
-                    onShareFile = onShareFile,
-                    onDragOut = onDragOut
+        if (detailFolder != null && !detailAbove) {
+            Spacer(modifier = Modifier.height(STRIP_GAP_DP.dp))
+            DetailArea(
+                viewModel = viewModel,
+                folder = detailFolder,
+                offsetXDp = detailOffsetXDp,
+                hasParent = detailPath.size > 1,
+                onNavigateInto = { detailPath = detailPath + it },
+                onNavigateBack = goBack,
+                onImportRequest = onImportRequest,
+                onOpenFile = onOpenFile,
+                onShareFile = onShareFile,
+                onDragOut = onDragOut
+            )
+        }
+    }
+}
+
+/**
+ * The slim horizontal strip: the collapse slot plus one small
+ * rectangle per top-level folder. The collapse slot sits on the side
+ * the bubble came from, so the strip grows away from the screen edge.
+ */
+@Composable
+fun FolderStrip(
+    folders: List<VaultFolder>,
+    openLeft: Boolean,
+    detailTopId: String?,
+    detailOpen: Boolean,
+    onToggleFolder: (VaultFolder) -> Unit,
+    onMoveFolder: (VaultFolder, Int, Int) -> Unit,
+    onCollapse: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(STRIP_GAP_DP.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (!openLeft) CollapseSlot(detailOpen = detailOpen, onCollapse = onCollapse)
+        folders.forEachIndexed { index, folder ->
+            FolderSlot(
+                folder = folder,
+                selected = folder.id == detailTopId,
+                onToggle = { onToggleFolder(folder) },
+                onMove = { delta -> onMoveFolder(folder, index, delta) }
+            )
+        }
+        if (openLeft) CollapseSlot(detailOpen = detailOpen, onCollapse = onCollapse)
+    }
+}
+
+/**
+ * The slot where the bubble was. Shows a hamburger while only the
+ * strip is open, morphs into an X once a detail is open. Either way,
+ * tapping it collapses everything back to the bubble.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun CollapseSlot(detailOpen: Boolean, onCollapse: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(
+                width = STRIP_HAMBURGER_WIDTH_DP.dp,
+                height = STRIP_SLOT_HEIGHT_DP.dp
+            )
+            .shadow(8.dp, RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.primary)
+            .combinedClickable(onClick = onCollapse)
+    ) {
+        AnimatedContent(
+            targetState = detailOpen,
+            transitionSpec = {
+                fadeIn() + scaleIn(initialScale = 0.6f) togetherWith
+                    fadeOut() + scaleOut(targetScale = 0.6f)
+            },
+            label = "collapseIcon"
+        ) { open ->
+            Icon(
+                imageVector = if (open) Icons.Filled.Close else Icons.Filled.Menu,
+                contentDescription = "Collapse back to bubble",
+                tint = Color.White,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+}
+
+/** One small rectangle in the horizontal strip: a folder's icon + name. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FolderSlot(
+    folder: VaultFolder,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    onMove: (delta: Int) -> Unit
+) {
+    val density = LocalDensity.current
+    var dragAccum by remember { mutableStateOf(0f) }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .size(
+                width = STRIP_SLOT_WIDTH_DP.dp,
+                height = STRIP_SLOT_HEIGHT_DP.dp
+            )
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant
+            )
+            .combinedClickable(onClick = onToggle)
+            .pointerInput(folder.id) {
+                val thresholdPx =
+                    with(density) { (STRIP_SLOT_WIDTH_DP + STRIP_GAP_DP).dp.toPx() }
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { dragAccum = 0f },
+                    onDragEnd = { dragAccum = 0f },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        dragAccum += dragAmount.x
+                        // One slot is about 92dp wide; cross it to swap once.
+                        if (dragAccum > thresholdPx) { onMove(1); dragAccum = 0f }
+                        if (dragAccum < -thresholdPx) { onMove(-1); dragAccum = 0f }
+                    }
                 )
+            }
+            .padding(4.dp)
+    ) {
+        Icon(
+            Icons.Filled.Folder,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(24.dp)
+        )
+        Text(
+            text = folder.name,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/**
+ * The second half of the L: either the vertical strip of a folder's
+ * children (lined up under the tapped slot) or, for a folder with no
+ * children, that folder's files.
+ */
+@Composable
+fun DetailArea(
+    viewModel: VaultViewModel,
+    folder: VaultFolder,
+    offsetXDp: Int,
+    hasParent: Boolean,
+    onNavigateInto: (String) -> Unit,
+    onNavigateBack: () -> Unit,
+    onImportRequest: (folderId: String, placeholderName: String?) -> Unit,
+    onOpenFile: (VaultFile) -> Unit,
+    onShareFile: (VaultFile) -> Unit,
+    onDragOut: (VaultFile, View) -> Unit
+) {
+    val children = viewModel.childFolders(folder.id)
+    if (children.isEmpty()) {
+        FilesPanel(
+            viewModel = viewModel,
+            folder = folder,
+            onCloseFiles = onNavigateBack,
+            onImportRequest = onImportRequest,
+            onOpenFile = onOpenFile,
+            onShareFile = onShareFile,
+            onDragOut = onDragOut
+        )
+        return
+    }
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
+        modifier = Modifier
+            .width(DETAIL_STRIP_WIDTH_DP.dp)
+            .padding(start = offsetXDp.dp)
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            if (hasParent) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                    Text(
+                        text = folder.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            children.forEachIndexed { index, child ->
+                FolderRow(
+                    folder = child,
+                    hasChildren = viewModel.childFolders(child.id).isNotEmpty(),
+                    onOpen = { onNavigateInto(child.id) },
+                    onMove = { delta -> viewModel.moveFolder(child.id, index + delta) }
+                )
+                if (index < children.lastIndex) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
             }
         }
     }
