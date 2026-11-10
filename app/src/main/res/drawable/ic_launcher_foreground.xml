@@ -3,10 +3,19 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Teal tile -->
     <path
         android:fillColor="#0E7C7B"
-        android:pathData="M54,18 L86,30 L86,78 L54,90 L22,78 L22,30 Z" />
+        android:pathData="M40,20 H68 A20,20 0 0 1 88,40 V68 A20,20 0 0 1 68,88 H40 A20,20 0 0 1 20,68 V40 A20,20 0 0 1 40,20 Z" />
+    <!-- White folder -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M44,38 h20 v8 h-12 v8 h10 v8 h-10 v12 h-8 Z" />
+        android:pathData="M39,47 H49 L53,52 H69 A4,4 0 0 1 73,56 V72 A4,4 0 0 1 69,76 H39 A4,4 0 0 1 35,72 V51 A4,4 0 0 1 39,47 Z" />
+    <!-- Document lines on the folder -->
+    <path
+        android:fillColor="#0E7C7B"
+        android:pathData="M43,60 H65 V62.5 H43 Z" />
+    <path
+        android:fillColor="#0E7C7B"
+        android:pathData="M43,66 H57 V68.5 H43 Z" />
 </vector>
